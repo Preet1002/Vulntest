@@ -1,0 +1,121 @@
+@import 'tailwindcss';
+
+/**
+ * Design tokens.
+ *
+ * Light values are defined on the bare :root; the dark set redefines the same
+ * tokens under both the OS media query and the explicit theme attribute, so the
+ * in-app toggle wins in both directions.
+ *
+ * Severity colours come from the reserved status palette and are deliberately
+ * never used for anything other than severity. Because two of them sit below
+ * 3:1 on the light surface, severity is *always* rendered with its name beside
+ * the colour - a badge, an axis label or a table cell - never colour alone.
+ */
+@theme {
+  --color-surface-0: #f9f9f7;
+  --color-surface-1: #fcfcfb;
+  --color-surface-2: #f2f1ed;
+  --color-line: #e1e0d9;
+  --color-grid: #e1e0d9;
+  --color-axis: #c3c2b7;
+
+  --color-ink: #0b0b0b;
+  --color-ink-2: #52514e;
+  --color-ink-muted: #898781;
+
+  --color-accent: #2a78d6;
+  --color-accent-soft: #cde2fb;
+  --color-good: #0ca30c;
+
+  --color-sev-critical: #d03b3b;
+  --color-sev-high: #ec835a;
+  --color-sev-medium: #fab219;
+  --color-sev-low: #2a78d6;
+  --color-sev-info: #898781;
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --color-surface-0: #0d0d0d;
+    --color-surface-1: #1a1a19;
+    --color-surface-2: #232322;
+    --color-line: #2c2c2a;
+    --color-grid: #2c2c2a;
+    --color-axis: #383835;
+
+    --color-ink: #ffffff;
+    --color-ink-2: #c3c2b7;
+    --color-ink-muted: #898781;
+
+    --color-accent: #3987e5;
+    --color-accent-soft: #184f95;
+    --color-good: #0ca30c;
+
+    --color-sev-low: #3987e5;
+  }
+}
+
+:root[data-theme='dark'] {
+  --color-surface-0: #0d0d0d;
+  --color-surface-1: #1a1a19;
+  --color-surface-2: #232322;
+  --color-line: #2c2c2a;
+  --color-grid: #2c2c2a;
+  --color-axis: #383835;
+
+  --color-ink: #ffffff;
+  --color-ink-2: #c3c2b7;
+  --color-ink-muted: #898781;
+
+  --color-accent: #3987e5;
+  --color-accent-soft: #184f95;
+  --color-good: #0ca30c;
+
+  --color-sev-low: #3987e5;
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+  }
+  :root[data-theme='light'] {
+    color-scheme: light;
+  }
+  :root[data-theme='dark'] {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-surface-0);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Recharts draws its own SVG text; keep it on the muted ink token. */
+  .recharts-cartesian-axis-tick text {
+    fill: var(--color-ink-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .recharts-cartesian-grid line {
+    stroke: var(--color-grid);
+  }
+}
+
+/* Long evidence blocks and URLs must wrap rather than widen the page. */
+.break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
