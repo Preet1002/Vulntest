@@ -46,36 +46,50 @@ export const SCANNER_USER_AGENT =
 
 /** Ceilings that a client-supplied scan configuration can never exceed. */
 export const HARD_LIMITS = {
-  maxPages: 250,
-  maxDepth: 6,
-  concurrency: 4,
+  maxPages: 2_000,
+  maxDepth: 12,
+  concurrency: 8,
   requestTimeoutMs: 30_000,
   delayMs: 5_000,
-  maxRequests: 4_000,
-  maxScanDurationMs: 20 * 60_000,
+  maxRequests: 20_000,
+  maxScanDurationMs: 60 * 60_000,
   maxResponseBytes: 3 * 1024 * 1024,
-  maxRedirects: 5,
+  maxRedirects: 8,
   // Distinct query-string variants tested per unique path+parameter-name set.
   // Keeps calendars / paginated archives from producing an endless crawl.
-  maxVariantsPerSignature: 8,
+  maxVariantsPerSignature: 50,
   maxUrlLength: 2048,
   maxFindings: 500,
   maxLogEntries: 300,
+  // Discovery budgets. These used to be fixed constants inside the crawler,
+  // which made every scan converge on the same small request count no matter
+  // how big the target was.
+  maxSitemapUrls: 5_000,
+  maxSitemapDocuments: 25,
+  maxScriptFiles: 60,
+  maxApiProbes: 200,
 };
 
 /** Defaults used when the dashboard does not override them. */
 export const DEFAULT_SCAN_CONFIG = {
-  maxPages: 100,
-  maxDepth: 3,
-  concurrency: 2,
+  maxPages: 500,
+  maxDepth: 6,
+  concurrency: 4,
   requestTimeoutMs: 10_000,
   delayMs: 250,
-  maxRequests: 1_500,
-  maxScanDurationMs: 10 * 60_000,
+  maxRequests: 6_000,
+  maxScanDurationMs: 20 * 60_000,
   maxResponseBytes: 2 * 1024 * 1024,
-  maxRedirects: 3,
+  maxRedirects: 5,
+  maxVariantsPerSignature: 20,
   respectRobots: true,
   allowSubdomains: false,
+  // Read /sitemap.xml (and any Sitemap: line in robots.txt) to seed the crawl.
+  // Link-following alone misses whole sections of most real sites.
+  useSitemap: true,
+  // If the start URL redirects to another host (the usual apex -> www hop),
+  // re-pin the scan to wherever it landed instead of crawling nothing.
+  followHostRedirect: true,
   checks: {
     xss: true,
     sqli: true,
@@ -127,8 +141,16 @@ export function resolveScanConfig(input = {}) {
       DEFAULT_SCAN_CONFIG.maxResponseBytes,
     ),
     maxRedirects: clamp(source.maxRedirects, 0, HARD_LIMITS.maxRedirects, DEFAULT_SCAN_CONFIG.maxRedirects),
+    maxVariantsPerSignature: clamp(
+      source.maxVariantsPerSignature,
+      1,
+      HARD_LIMITS.maxVariantsPerSignature,
+      DEFAULT_SCAN_CONFIG.maxVariantsPerSignature,
+    ),
     respectRobots: source.respectRobots !== false,
     allowSubdomains: source.allowSubdomains === true,
+    useSitemap: source.useSitemap !== false,
+    followHostRedirect: source.followHostRedirect !== false,
     checks: {
       xss: checks.xss !== false,
       sqli: checks.sqli !== false,

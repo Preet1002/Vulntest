@@ -58,6 +58,31 @@ test('target policy can opt into subdomains', () => {
   const policy = new TargetPolicy(new URL('https://target.example/'), { allowSubdomains: true });
   assert.equal(policy.isAllowed('https://api.target.example/v1'), true);
   assert.equal(policy.isAllowed('https://nottarget.example/'), false);
+  // A look-alike host that merely *contains* the target name stays out.
+  assert.equal(policy.isAllowed('https://target.example.evil.example/'), false);
+});
+
+test('target policy treats www and the apex as the same site', () => {
+  const fromApex = new TargetPolicy(new URL('https://target.example/'));
+  assert.equal(fromApex.isAllowed('https://www.target.example/page'), true);
+
+  const fromWww = new TargetPolicy(new URL('https://www.target.example/'));
+  assert.equal(fromWww.isAllowed('https://target.example/page'), true);
+
+  // The equivalence is only about `www.` - everything else is still refused.
+  assert.equal(fromWww.isAllowed('https://api.target.example/'), false);
+  assert.equal(fromWww.isAllowed('https://wwwtarget.example/'), false);
+  assert.equal(fromApex.isAllowed('https://www.target.example.evil.example/'), false);
+});
+
+test('target policy can be re-pinned to where the start URL redirected', () => {
+  const policy = new TargetPolicy(new URL('https://target.example/'));
+  assert.equal(policy.isAllowed('https://shop.target.example/'), false);
+
+  policy.rebind(new URL('https://shop.target.example/'));
+  assert.equal(policy.isAllowed('https://shop.target.example/cart'), true);
+  assert.equal(policy.origin, 'https://shop.target.example');
+  assert.equal(policy.isAllowed('https://evil.example/'), false);
 });
 
 test('URL dedupe ignores tracking parameters and ordering', () => {

@@ -14,28 +14,32 @@ import { loadSettings, saveSettings, updateFindingStatus } from '../utils/storag
 const ACTIVE_SCAN_KEY = 'vulnscan:activeScanId';
 
 const FALLBACK_CONFIG = {
-  maxPages: 100,
-  maxDepth: 3,
-  concurrency: 2,
+  maxPages: 500,
+  maxDepth: 6,
+  concurrency: 4,
   requestTimeoutMs: 10_000,
   delayMs: 250,
-  maxRequests: 1_500,
-  maxScanDurationMs: 600_000,
+  maxRequests: 6_000,
+  maxScanDurationMs: 1_200_000,
+  maxVariantsPerSignature: 20,
   respectRobots: true,
   allowSubdomains: false,
+  useSitemap: true,
+  followHostRedirect: true,
   testForms: true,
   testPostForms: false,
   checks: { xss: true, sqli: true, pathTraversal: true, passive: true },
 };
 
 const FALLBACK_LIMITS = {
-  maxPages: 250,
-  maxDepth: 6,
-  concurrency: 4,
+  maxPages: 2_000,
+  maxDepth: 12,
+  concurrency: 8,
   requestTimeoutMs: 30_000,
   delayMs: 5_000,
-  maxRequests: 4_000,
-  maxScanDurationMs: 1_200_000,
+  maxRequests: 20_000,
+  maxScanDurationMs: 3_600_000,
+  maxVariantsPerSignature: 50,
 };
 
 export function DashboardPage() {

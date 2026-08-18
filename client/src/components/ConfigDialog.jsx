@@ -8,6 +8,13 @@ const NUMBER_FIELDS = [
   { key: 'delayMs', label: 'Delay between requests (ms)', hint: 'Raised automatically if robots.txt asks.', min: 0, limitKey: 'delayMs' },
   { key: 'requestTimeoutMs', label: 'Request timeout (ms)', min: 1000, limitKey: 'requestTimeoutMs' },
   { key: 'maxRequests', label: 'Request budget', hint: 'Hard cap on total requests.', min: 1, limitKey: 'maxRequests' },
+  {
+    key: 'maxVariantsPerSignature',
+    label: 'Variants per endpoint',
+    hint: 'How many value-variants of the same path+parameters to crawl.',
+    min: 1,
+    limitKey: 'maxVariantsPerSignature',
+  },
 ];
 
 const CHECKS = [
@@ -133,9 +140,19 @@ export function ConfigDialog({ open, config, limits, onSave, onClose }) {
             <div className="space-y-2">
               {[
                 {
+                  key: 'useSitemap',
+                  label: 'Use sitemaps',
+                  hint: 'Seed the crawl from sitemap.xml. Reaches pages the front page never links to.',
+                },
+                {
+                  key: 'followHostRedirect',
+                  label: 'Follow the start URL to where it redirects',
+                  hint: 'Handles the usual apex to www hop. Only ever follows within the same site.',
+                },
+                {
                   key: 'respectRobots',
                   label: 'Respect robots.txt',
-                  hint: 'Skip disallowed paths and honour Crawl-delay.',
+                  hint: 'Skip disallowed paths and honour Crawl-delay. Turning this off finds more.',
                 },
                 {
                   key: 'allowSubdomains',

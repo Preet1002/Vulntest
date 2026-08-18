@@ -6,6 +6,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../src/app.js';
+import { DEFAULT_SCAN_CONFIG, HARD_LIMITS } from '../src/config/index.js';
 
 let server;
 let base;
@@ -90,8 +91,11 @@ test('unknown scans return 404 and unknown routes are handled', async () => {
 test('scan configuration limits are published for the dashboard', async () => {
   const response = await fetch(`${base}/api/config`);
   const { defaults, limits } = await response.json();
-  assert.equal(defaults.maxPages, 100);
-  assert.equal(limits.maxPages, 250);
+  assert.equal(defaults.maxPages, DEFAULT_SCAN_CONFIG.maxPages);
+  assert.equal(limits.maxPages, HARD_LIMITS.maxPages);
+  assert.ok(defaults.maxPages <= limits.maxPages, 'the default page budget fits inside the hard limit');
+  assert.ok(defaults.useSitemap, 'sitemap discovery is on by default');
+  assert.ok(defaults.followHostRedirect, 'the start URL is followed to where it redirects by default');
 });
 
 test('oversized request bodies are rejected', async () => {

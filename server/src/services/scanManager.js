@@ -67,6 +67,52 @@ export async function startScan({ target, config = {}, authorized = false }) {
   return scan;
 }
 
+/** Hostname with a leading `www.` removed - `www` is not a separate site. */
+const apexOf = (host) => (host.startsWith('www.') ? host.slice(4) : host);
+
+/**
+ * Find out where the start URL actually lands.
+ *
+ * Most sites answer their apex or their http:// address with a redirect. When
+ * the destination is outside the pinned scope the crawler receives a valid but
+ * empty response, finds no links and finishes after one page - which looks
+ * exactly like a site with nothing on it.
+ *
+ * The scan is re-pinned only when the destination is the same site (a `www`
+ * hop, or another host under the same apex). A redirect to an unrelated domain
+ * is reported instead of followed: the operator confirmed authorisation for
+ * this target, and that confirmation does not transfer to somebody else's.
+ *
+ * @returns {Promise<URL|null>} the URL to scan instead, or null to keep the target
+ */
+async function resolveCanonicalTarget(ctx, url) {
+  const response = await ctx.http.get(url.href, { purpose: 'canonical', ignoreScope: true });
+  if (!response.ok || response.redirects.length === 0) return null;
+
+  let landing;
+  try {
+    landing = new URL(response.url);
+  } catch {
+    return null;
+  }
+  if (landing.origin === url.origin) return null;
+
+  const targetApex = apexOf(url.hostname.toLowerCase());
+  const landingHost = landing.hostname.toLowerCase();
+  const sameSite = apexOf(landingHost) === targetApex || landingHost.endsWith(`.${targetApex}`);
+
+  if (!sameSite) {
+    ctx.log(
+      'warn',
+      `${url.href} redirects to ${landing.origin}, a different site. Staying on the authorised target - scan ${landing.origin} directly if you are authorised to.`,
+    );
+    return null;
+  }
+
+  ctx.log('info', `${url.href} redirects to ${landing.href} - scanning there instead.`);
+  return landing;
+}
+
 async function execute(scan, url, config) {
   const policy = new TargetPolicy(url, { allowSubdomains: config.allowSubdomains });
   const ctx = new ScanContext(scan, policy);
@@ -74,6 +120,18 @@ async function execute(scan, url, config) {
 
   try {
     ctx.setStatus(SCAN_STATUS.CRAWLING);
+
+    if (config.followHostRedirect) {
+      ctx.setPhase('resolving', 'Resolving the start URL.');
+      const landing = await resolveCanonicalTarget(ctx, url);
+      if (landing) {
+        policy.rebind(landing);
+        url = landing;
+        scan.target = landing.href;
+        scan.origin = landing.origin;
+      }
+    }
+
     ctx.setPhase('robots', 'Checking robots.txt.');
 
     if (config.respectRobots) {

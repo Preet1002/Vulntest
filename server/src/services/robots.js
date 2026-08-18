@@ -18,6 +18,7 @@ function patternToRegExp(pattern) {
 
 export function parseRobots(text = '') {
   const groups = [];
+  const sitemaps = [];
   let current = null;
   let expectingAgent = false;
 
@@ -29,6 +30,12 @@ export function parseRobots(text = '') {
 
     const field = line.slice(0, separator).trim().toLowerCase();
     const value = line.slice(separator + 1).trim();
+
+    // `Sitemap:` is group-independent - it applies to the whole file.
+    if (field === 'sitemap') {
+      if (value) sitemaps.push(value);
+      continue;
+    }
 
     if (field === 'user-agent') {
       if (!current || !expectingAgent) {
@@ -53,6 +60,7 @@ export function parseRobots(text = '') {
     }
   }
 
+  groups.sitemaps = sitemaps;
   return groups;
 }
 
@@ -65,6 +73,8 @@ export class RobotsPolicy {
     const selected = matching.length > 0 ? matching : wildcard;
 
     this.rules = selected.flatMap((group) => group.rules);
+    // Sitemap URLs are file-level, not per-agent, so they survive group selection.
+    this.sitemaps = Array.isArray(groups.sitemaps) ? [...groups.sitemaps] : [];
     this.crawlDelayMs = selected.reduce((max, group) => {
       const delay = group.crawlDelay ? group.crawlDelay * 1000 : 0;
       return Math.max(max, delay);

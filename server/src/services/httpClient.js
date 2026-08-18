@@ -31,6 +31,37 @@ const httpsAgent = new https.Agent(agentOptions);
 
 const TEXTUAL_CONTENT = /(text\/|json|javascript|xml|x-www-form-urlencoded|\+xml|\+json)/i;
 
+/**
+ * A deliberately minimal cookie jar: names and values only, scoped to the one
+ * site the scan is pinned to. Many sites hand out a session on the first
+ * response and serve a redirect loop or a consent wall until it comes back, so
+ * a scanner without a jar sees a fraction of the pages a browser does. Nothing
+ * here is persisted and the jar dies with the scan.
+ */
+class CookieJar {
+  constructor() {
+    this.cookies = new Map();
+  }
+
+  store(setCookieHeader) {
+    const values = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+    for (const raw of values) {
+      if (typeof raw !== 'string') continue;
+      const pair = raw.split(';')[0];
+      const separator = pair.indexOf('=');
+      if (separator <= 0) continue;
+      const name = pair.slice(0, separator).trim();
+      const value = pair.slice(separator + 1).trim();
+      if (name) this.cookies.set(name, value);
+    }
+  }
+
+  header() {
+    if (this.cookies.size === 0) return null;
+    return [...this.cookies.entries()].map(([name, value]) => `${name}=${value}`).join('; ');
+  }
+}
+
 export class ScannerHttpClient {
   /**
    * @param {object} options
@@ -51,6 +82,7 @@ export class ScannerHttpClient {
     this.requestCount = 0;
     this.errorCount = 0;
     this.bytesReceived = 0;
+    this.jar = new CookieJar();
   }
 
   get budgetExhausted() {
@@ -71,7 +103,14 @@ export class ScannerHttpClient {
    *   truncated: boolean
    * }>}
    */
-  async request({ url, method = 'GET', headers = {}, data = null, purpose = 'crawl' } = {}) {
+  async request({
+    url,
+    method = 'GET',
+    headers = {},
+    data = null,
+    purpose = 'crawl',
+    ignoreScope = false,
+  } = {}) {
     const requestedUrl = url instanceof URL ? url.href : String(url);
     const result = {
       ok: false,
@@ -87,6 +126,9 @@ export class ScannerHttpClient {
       redirects: [],
       error: null,
       truncated: false,
+      // Set when a redirect pointed outside the pinned scope. The crawler needs
+      // to tell this apart from "the page really was empty".
+      blockedRedirect: null,
     };
 
     if (this.shouldStop()) {
@@ -98,11 +140,17 @@ export class ScannerHttpClient {
       return result;
     }
 
-    try {
-      this.policy.assertAllowed(requestedUrl);
-    } catch (error) {
-      result.error = error.message;
-      return result;
+    // `ignoreScope` is only ever used to resolve where the operator-supplied
+    // start URL actually lands. The SSRF guard still applies: every socket
+    // resolves through `safeLookup`, so a private address is refused at connect
+    // time regardless of what this flag says.
+    if (!ignoreScope) {
+      try {
+        this.policy.assertAllowed(requestedUrl);
+      } catch (error) {
+        result.error = error.message;
+        return result;
+      }
     }
 
     const started = Date.now();
@@ -143,6 +191,7 @@ export class ScannerHttpClient {
               Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
               'Accept-Language': 'en-US,en;q=0.9',
               'X-Scanner': 'authorized-vulnerability-scan',
+              ...(this.jar.header() ? { Cookie: this.jar.header() } : {}),
               ...headers,
             },
           });
@@ -152,6 +201,7 @@ export class ScannerHttpClient {
         result.headers = response.headers?.toJSON ? response.headers.toJSON() : { ...response.headers };
         result.contentType = String(result.headers['content-type'] || '');
         result.url = currentUrl;
+        if (result.headers['set-cookie']) this.jar.store(result.headers['set-cookie']);
 
         const location = result.headers.location;
         const isRedirect = response.status >= 300 && response.status < 400 && location;
@@ -179,11 +229,12 @@ export class ScannerHttpClient {
           break;
         }
 
-        const verdict = this.policy.check(nextUrl);
+        const verdict = ignoreScope ? { allowed: true } : this.policy.check(nextUrl);
         if (!verdict.allowed) {
           result.ok = true; // the response itself is valid, we just stop here
           result.error = `redirect to ${nextUrl} not followed: ${verdict.reason}`;
           result.body = '';
+          result.blockedRedirect = nextUrl;
           break;
         }
 

@@ -13,6 +13,8 @@ import { emptyStatistics, SCAN_STATUS } from '../src/services/scanStore.js';
 import { parseHtml } from '../src/crawler/parser.js';
 import { determineContext } from '../src/scanner/xss.js';
 import { FakeHttpClient, ORIGIN } from './fixtures/fakeSite.js';
+import { parseSitemap, collectSitemapUrls } from '../src/services/sitemap.js';
+import { parseRobots, RobotsPolicy } from '../src/services/robots.js';
 
 function makeContext(overrides = {}) {
   const config = resolveScanConfig({ maxPages: 30, maxDepth: 3, concurrency: 2, delayMs: 0, testPostForms: false, ...overrides });
@@ -230,5 +232,94 @@ test('form parsing records method, action, input names and types', () => {
   assert.deepEqual(
     form.inputs.map((input) => `${input.name}:${input.type}`),
     ['a:text', 'b:textarea', 'c:select', 'd:password'],
+  );
+});
+
+// --- discovery: sitemaps ----------------------------------------------------
+
+test('sitemap parser reads XML, plain text and entity-escaped URLs', () => {
+  const xml = `<?xml version="1.0"?><urlset>
+    <url><loc>${ORIGIN}/a?x=1&amp;y=2</loc></url>
+    <url><loc>${ORIGIN}/b</loc></url></urlset>`;
+  assert.deepEqual(parseSitemap(xml), [`${ORIGIN}/a?x=1&y=2`, `${ORIGIN}/b`]);
+
+  assert.deepEqual(parseSitemap(`${ORIGIN}/one\n${ORIGIN}/two\n`), [`${ORIGIN}/one`, `${ORIGIN}/two`]);
+  assert.deepEqual(parseSitemap('<urlset></urlset>'), []);
+});
+
+test('robots.txt Sitemap directives are kept alongside the rules', () => {
+  const policy = new RobotsPolicy(
+    parseRobots(`User-agent: *\nDisallow: /admin\n\nSitemap: ${ORIGIN}/sitemap.xml\n`),
+  );
+  assert.deepEqual(policy.sitemaps, [`${ORIGIN}/sitemap.xml`]);
+  assert.equal(policy.isAllowed(`${ORIGIN}/admin`), false);
+});
+
+test('sitemap discovery follows an index and stays inside the target scope', async () => {
+  const ctx = makeContext();
+  const documents = {
+    [`${ORIGIN}/sitemap.xml`]: `<?xml version="1.0"?><sitemapindex>
+      <sitemap><loc>${ORIGIN}/sitemap-1.xml</loc></sitemap></sitemapindex>`,
+    [`${ORIGIN}/sitemap-1.xml`]: `<?xml version="1.0"?><urlset>
+      <url><loc>${ORIGIN}/deep/1</loc></url>
+      <url><loc>${ORIGIN}/deep/2</loc></url>
+      <url><loc>https://other.example/off-site</loc></url></urlset>`,
+  };
+  ctx.http = new FakeHttpClient({
+    ctx,
+    handler: (url) =>
+      documents[url]
+        ? { status: 200, headers: { 'content-type': 'application/xml' }, body: documents[url] }
+        : { status: 404, headers: { 'content-type': 'text/html' }, body: 'no' },
+  });
+
+  const { urls } = await collectSitemapUrls(ctx, [`${ORIGIN}/sitemap.xml`]);
+  assert.deepEqual(urls.sort(), [`${ORIGIN}/deep/1`, `${ORIGIN}/deep/2`]);
+});
+
+test('the crawler reaches pages that are only listed in a sitemap', async () => {
+  const ctx = makeContext({ maxPages: 50 });
+  const sitemap = `<?xml version="1.0"?><urlset>${Array.from(
+    { length: 20 },
+    (_, index) => `<url><loc>${ORIGIN}/archive/${index}</loc></url>`,
+  ).join('')}</urlset>`;
+
+  ctx.http = new FakeHttpClient({
+    ctx,
+    handler: (url) => {
+      if (url === `${ORIGIN}/sitemap.xml`) {
+        return { status: 200, headers: { 'content-type': 'application/xml' }, body: sitemap };
+      }
+      if (url.includes('/sitemap')) return { status: 404, headers: {}, body: '' };
+      // The front page links to nothing at all - the archive is sitemap-only.
+      return {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+        body: '<!doctype html><html><head><title>t</title></head><body><p>page</p></body></html>',
+      };
+    },
+  });
+
+  await crawl(ctx);
+  const crawled = ctx.endpoints.filter((endpoint) => endpoint.url.includes('/archive/'));
+  assert.equal(crawled.length, 20, 'every sitemap URL was crawled');
+});
+
+test('sitemap discovery is skipped when the option is off', async () => {
+  const ctx = makeContext({ useSitemap: false });
+  await crawl(ctx);
+  assert.ok(
+    !ctx.http.requests.some((request) => request.purpose === 'sitemap'),
+    'no sitemap request was made',
+  );
+});
+
+test('hitting the page limit is reported with what was left uncrawled', async () => {
+  const ctx = makeContext({ maxPages: 3 });
+  await crawl(ctx);
+  const messages = ctx.scan.log.map((entry) => entry.message);
+  assert.ok(
+    messages.some((message) => /Page limit reached \(3\)/.test(message)),
+    `the page limit was reported, got: ${messages.join(' | ')}`,
   );
 });

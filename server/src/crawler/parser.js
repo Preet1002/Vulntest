@@ -16,6 +16,10 @@ const URL_ATTRIBUTES = [
   ['frame', 'src'],
   ['link[rel="canonical"]', 'href'],
   ['link[rel="alternate"]', 'href'],
+  // Pagination hints. Following these is often the only way to reach page 2
+  // onwards of an archive or a product listing.
+  ['link[rel="next"]', 'href'],
+  ['link[rel="prev"]', 'href'],
   ['form', 'action'],
   ['[data-url]', 'data-url'],
   ['[data-href]', 'data-href'],

@@ -94,7 +94,7 @@ Express API  (routes/, middleware/)
 Scan manager  (services/scanManager.js)
         |            creates a ScanContext per scan:
         |            policy + HTTP client + limits + findings
-        +--> Crawler   (crawler/)   BFS queue, depth/page caps, robots.txt
+        +--> Crawler   (crawler/)   sitemaps + BFS queue, depth/page caps, robots
         +--> Scanner   (scanner/)   xss.js · sqli.js · pathTraversal.js · passive.js
         |
 HTTP request layer  (services/httpClient.js)
@@ -178,6 +178,7 @@ vulnerability-scanner/
         │   ├── httpClient.js       the single outbound HTTP layer
         │   ├── rateLimiter.js      concurrency + inter-request delay
         │   ├── robots.js           robots.txt parsing and matching
+        │   ├── sitemap.js          sitemap.xml discovery and parsing
         │   ├── scanStore.js        in-memory scans + SSE event bus
         │   ├── scanContext.js      per-scan state, findings, progress
         │   └── scanManager.js      scan lifecycle
@@ -387,20 +388,44 @@ Defaults, and the hard ceilings the server clamps to:
 
 | Setting | Default | Max |
 |---|---|---|
-| Maximum pages | 100 | 250 |
-| Maximum depth | 3 | 6 |
-| Concurrency | 2 | 4 |
+| Maximum pages | 500 | 2000 |
+| Maximum depth | 6 | 12 |
+| Concurrency | 4 | 8 |
 | Delay between requests | 250 ms | 5000 ms |
 | Request timeout | 10 s | 30 s |
-| Request budget | 1500 | 4000 |
-| Scan duration | 10 min | 20 min |
+| Request budget | 6000 | 20000 |
+| Scan duration | 20 min | 60 min |
 | Response size | 2 MB | 3 MB |
+| Variants per endpoint | 20 | 50 |
 
-Also configurable: `respectRobots` (on), `allowSubdomains` (off), `testForms`
-(on, GET only), `testPostForms` (off), and each detection module.
+Also configurable: `useSitemap` (on), `followHostRedirect` (on),
+`respectRobots` (on), `allowSubdomains` (off), `testForms` (on, GET only),
+`testPostForms` (off), and each detection module.
 
 `robots.txt` is honoured by default including `Crawl-delay`, which raises the
 inter-request delay for the whole scan.
+
+### Coverage
+
+Three things decide how much of a site a scan sees:
+
+- **Sitemaps** (`useSitemap`). Any `Sitemap:` line in `robots.txt` plus the
+  well-known locations are read and used to seed the queue, including one level
+  of sitemap-index nesting. Most sites link only a fraction of their pages from
+  the front page, so this is usually the difference between tens and hundreds of
+  pages.
+- **Where the start URL lands** (`followHostRedirect`). `example.com` normally
+  answers with a redirect to `www.example.com`. Both spellings are always
+  treated as one site, and a redirect to another host under the same apex
+  re-pins the scan. A redirect to an unrelated domain is reported and *not*
+  followed — your authorisation covers the target you entered.
+- **The budgets above.** Whenever a bound is what ended a crawl — the page
+  limit, the request budget, robots.txt, the depth cap, the per-endpoint variant
+  cap — the activity log says so and how many known URLs were left uncrawled.
+
+Session cookies are kept for the duration of a scan, so sites that gate content
+behind a first-visit cookie are crawled rather than answering every request with
+the same interstitial.
 
 ---
 
@@ -472,8 +497,16 @@ private network. That is the SSRF guard doing its job; see
 [`ALLOW_PRIVATE_TARGETS`](#allow_private_targets) if it is your own local app.
 
 **Scan finishes immediately with one endpoint** — the target returned a
-non-HTML response, redirected off-origin, or `robots.txt` disallows the start
-path. Check the activity log in the progress panel.
+non-HTML response, redirected to a host outside the scope, or `robots.txt`
+disallows the start path. The activity log in the progress panel names which
+one, including the redirect destination and how many links each filter dropped.
+If the site spreads across subdomains, enable "Include subdomains".
+
+**The scan covers fewer pages than expected** — read the end of the activity
+log. It reports whether the page limit or the request budget stopped the crawl,
+how many discovered URLs were left in the queue, and how many links were skipped
+by `robots.txt`, the depth cap or the per-endpoint variant cap. Raise the
+relevant setting in the scan configuration dialog and scan again.
 
 **No findings on a site you know is vulnerable** — the parameters may be behind
 authentication (this scanner does not log in), in POST forms (opt-in), or the

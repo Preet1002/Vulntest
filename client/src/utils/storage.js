@@ -7,7 +7,9 @@
  * reach a finding.
  */
 const HISTORY_KEY = 'vulnscan:history:v1';
-const SETTINGS_KEY = 'vulnscan:settings:v1';
+// Bumped to v2 so browsers that stored the old, much smaller crawl budgets
+// pick up the current defaults instead of pinning every scan to 100 pages.
+const SETTINGS_KEY = 'vulnscan:settings:v2';
 const THEME_KEY = 'vulnscan:theme';
 
 /** Keep the browser store small and predictable. */

@@ -1,13 +1,18 @@
 /**
  * Controlled breadth-first crawler.
  *
+ * Discovery comes from three places: the site's sitemaps, links in the HTML and
+ * endpoint-looking strings in its JavaScript.
+ *
  * Bounded by: max pages, max depth, max requests, scan duration, robots.txt,
- * the same-origin policy and a per-endpoint variant cap that stops calendar and
- * pagination loops from consuming the whole page budget.
+ * the same-site policy and a per-endpoint variant cap that stops calendar and
+ * pagination loops from consuming the whole page budget. Whenever one of those
+ * bounds is what ended the crawl, it is written to the activity log.
  */
 import { parseHtml, extractEndpointsFromScript } from './parser.js';
 import { runPassiveChecks } from '../scanner/passive.js';
 import { HARD_LIMITS } from '../config/index.js';
+import { collectSitemapUrls } from '../services/sitemap.js';
 import {
   dedupeKey,
   signatureKey,
@@ -19,8 +24,6 @@ import {
   shortenUrl,
 } from '../utils/url.js';
 
-const MAX_SCRIPT_FILES = 12;
-const MAX_API_PROBES = 25;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Endpoints whose name suggests a GET would change state - never probed. */
@@ -38,16 +41,47 @@ export async function crawl(ctx) {
   const scriptUrls = new Set();
   const apiCandidates = new Set();
 
+  // Why links were rejected. Reported at the end so a thin crawl is explained
+  // rather than silently looking like "the site only has three pages".
+  const skipped = {
+    offScope: 0,
+    robots: 0,
+    depth: 0,
+    variantCap: 0,
+    trap: 0,
+    asset: 0,
+  };
+
   let pages = 0;
   let activeWorkers = 0;
+  let queueOverflow = 0;
 
-  const enqueue = (rawUrl, depth) => {
-    if (depth > ctx.config.maxDepth) return;
+  /**
+   * @param {string|URL} rawUrl
+   * @param {number} depth
+   * @param {{trusted?: boolean}} [options] `trusted` URLs come from a sitemap -
+   *   the site published them itself, so the anti-trap variant cap is not
+   *   applied to them.
+   */
+  const enqueue = (rawUrl, depth, { trusted = false } = {}) => {
+    if (depth > ctx.config.maxDepth) {
+      skipped.depth += 1;
+      return;
+    }
     const url = normalizeUrl(rawUrl);
     if (!url) return;
-    if (!ctx.policy.isAllowed(url)) return;
-    if (isSkippableAsset(url)) return;
-    if (looksLikeCrawlTrap(url)) return;
+    if (!ctx.policy.isAllowed(url)) {
+      skipped.offScope += 1;
+      return;
+    }
+    if (isSkippableAsset(url)) {
+      skipped.asset += 1;
+      return;
+    }
+    if (!trusted && looksLikeCrawlTrap(url)) {
+      skipped.trap += 1;
+      return;
+    }
 
     const key = dedupeKey(url);
     if (visited.has(key)) return;
@@ -55,14 +89,47 @@ export async function crawl(ctx) {
     // Cap how many value-variants of the same path+parameter-set we visit.
     const signature = signatureKey(url);
     const seen = signatureCounts.get(signature) || 0;
-    if (seen >= HARD_LIMITS.maxVariantsPerSignature) return;
+    if (!trusted && seen >= ctx.config.maxVariantsPerSignature) {
+      skipped.variantCap += 1;
+      return;
+    }
 
-    if (ctx.config.respectRobots && ctx.robots && !ctx.robots.isAllowed(url)) return;
+    if (ctx.config.respectRobots && ctx.robots && !ctx.robots.isAllowed(url)) {
+      skipped.robots += 1;
+      return;
+    }
+
+    // The queue is bounded so a very large site cannot grow it without limit;
+    // anything past the ceiling is simply not scheduled.
+    if (queue.length >= HARD_LIMITS.maxPages * 4) {
+      queueOverflow += 1;
+      return;
+    }
 
     visited.add(key);
     signatureCounts.set(signature, seen + 1);
     queue.push({ url: url.href, depth });
   };
+
+  // --- seed the queue from the site's own sitemaps -------------------------
+  if (ctx.config.useSitemap && !ctx.shouldStop()) {
+    ctx.setPhase('sitemap', 'Looking for sitemaps to seed the crawl.');
+    try {
+      const { urls } = await collectSitemapUrls(ctx, ctx.robots?.sitemaps || []);
+      let seeded = 0;
+      for (const url of urls) {
+        const before = queue.length;
+        enqueue(url, 0, { trusted: true });
+        if (queue.length > before) seeded += 1;
+      }
+      if (seeded > 0) {
+        ctx.log('info', `Seeded ${seeded} URL(s) from sitemaps (${urls.length} listed).`);
+      }
+    } catch (error) {
+      ctx.log('warn', `Sitemap discovery failed: ${error.message}`);
+    }
+    ctx.setPhase('crawling');
+  }
 
   const processPage = async (item) => {
     const response = await ctx.http.get(item.url, { purpose: 'crawl' });
@@ -84,6 +151,17 @@ export async function crawl(ctx) {
       return;
     }
 
+    // A redirect out of scope returns a valid but empty response. Saying so is
+    // what turns "the crawl found nothing" into something the operator can act
+    // on (usually by allowing subdomains).
+    if (response.blockedRedirect) {
+      ctx.log(
+        'warn',
+        `${shortenUrl(item.url)} redirects to ${shortenUrl(response.blockedRedirect)}, which is out of scope - not crawled.`,
+      );
+      return;
+    }
+
     const isHtml = /html|xhtml/i.test(response.contentType) || /^\s*<(!doctype|html)/i.test(response.body);
     if (!isHtml) {
       if (ctx.config.checks.passive) runPassiveChecks(ctx, response, null);
@@ -98,7 +176,7 @@ export async function crawl(ctx) {
     for (const link of parsed.links) enqueue(link, item.depth + 1);
 
     for (const script of parsed.scripts) {
-      if (ctx.policy.isAllowed(script) && scriptUrls.size < MAX_SCRIPT_FILES * 4) {
+      if (ctx.policy.isAllowed(script) && scriptUrls.size < HARD_LIMITS.maxScriptFiles * 4) {
         scriptUrls.add(script);
       }
     }
@@ -161,12 +239,53 @@ export async function crawl(ctx) {
     'info',
     `Crawl finished: ${pages} page(s), ${ctx.endpoints.length} endpoint(s), ${ctx.http.requestCount} request(s).`,
   );
+  reportCrawlLimits(ctx, { pages, queued: queue.length, skipped, queueOverflow });
   return { pages };
+}
+
+/**
+ * Explain what ended the crawl and what was left on the table. Without this a
+ * short scan is indistinguishable from a small site, which is the single most
+ * confusing thing a crawler can do.
+ */
+function reportCrawlLimits(ctx, { pages, queued, skipped, queueOverflow }) {
+  if (pages >= ctx.config.maxPages) {
+    ctx.log(
+      'warn',
+      `Page limit reached (${ctx.config.maxPages}); ${queued} known URL(s) were left uncrawled. Raise "Maximum pages" to go further.`,
+    );
+  } else if (ctx.http.budgetExhausted) {
+    ctx.log(
+      'warn',
+      `Request budget reached (${ctx.config.maxRequests}); ${queued} known URL(s) were left uncrawled.`,
+    );
+  }
+
+  const reasons = [];
+  if (skipped.robots > 0) reasons.push(`${skipped.robots} disallowed by robots.txt`);
+  if (skipped.offScope > 0) reasons.push(`${skipped.offScope} outside the target scope`);
+  if (skipped.depth > 0) reasons.push(`${skipped.depth} beyond depth ${ctx.config.maxDepth}`);
+  if (skipped.variantCap > 0) {
+    reasons.push(`${skipped.variantCap} over the ${ctx.config.maxVariantsPerSignature}-variant per-endpoint cap`);
+  }
+  if (skipped.trap > 0) reasons.push(`${skipped.trap} look like crawl traps`);
+  if (queueOverflow > 0) reasons.push(`${queueOverflow} past the queue ceiling`);
+
+  if (reasons.length > 0) {
+    ctx.log('info', `Links not followed: ${reasons.join(', ')}.`);
+  }
+
+  if (pages <= 1 && skipped.offScope > 0) {
+    ctx.log(
+      'warn',
+      'Almost every link pointed off-scope. If the site spreads across subdomains, enable "Allow subdomains" and scan again.',
+    );
+  }
 }
 
 /** Fetch a handful of same-origin scripts and mine them for API routes. */
 async function analyzeScripts(ctx, scriptUrls, apiCandidates) {
-  const list = [...scriptUrls].filter(isScriptAsset).slice(0, MAX_SCRIPT_FILES);
+  const list = [...scriptUrls].filter(isScriptAsset).slice(0, HARD_LIMITS.maxScriptFiles);
   if (list.length === 0) return;
 
   ctx.setPhase('analyzing-scripts', `Analyzing ${list.length} script file(s) for endpoints.`);
@@ -188,7 +307,7 @@ async function probeApiCandidates(ctx, apiCandidates) {
   const known = new Set(ctx.endpoints.map((endpoint) => dedupeKey(endpoint.url)));
   const list = [...apiCandidates]
     .filter((url) => !known.has(dedupeKey(url)))
-    .slice(0, MAX_API_PROBES);
+    .slice(0, HARD_LIMITS.maxApiProbes);
   if (list.length === 0) return;
 
   ctx.setPhase('probing-endpoints', `Verifying ${list.length} endpoint(s) discovered in JavaScript.`);

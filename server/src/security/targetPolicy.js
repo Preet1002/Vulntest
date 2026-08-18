@@ -10,6 +10,9 @@ import { assertSafeUrl } from './ssrfGuard.js';
 import { HARD_LIMITS } from '../config/index.js';
 import { AppError, BlockedTargetError } from '../utils/errors.js';
 
+/** `www.example.com` and `example.com` are the same site, not two targets. */
+const withoutWww = (host) => (host.startsWith('www.') ? host.slice(4) : host);
+
 export class TargetPolicy {
   /**
    * @param {URL} targetUrl validated target
@@ -19,7 +22,22 @@ export class TargetPolicy {
     this.target = targetUrl;
     this.origin = targetUrl.origin;
     this.hostname = targetUrl.hostname.toLowerCase();
+    this.apexHostname = withoutWww(this.hostname);
     this.allowSubdomains = allowSubdomains;
+  }
+
+  /**
+   * Re-pin the policy after the start URL redirected somewhere else - the
+   * apex -> www hop that most sites perform. Without this the scan stays
+   * pinned to a host that only ever answers with a redirect, and the crawl
+   * ends after a single page.
+   * @param {URL} url the URL the seed request actually landed on
+   */
+  rebind(url) {
+    this.target = url;
+    this.origin = url.origin;
+    this.hostname = url.hostname.toLowerCase();
+    this.apexHostname = withoutWww(this.hostname);
   }
 
   /** @returns {{allowed: boolean, reason: string|null}} */
@@ -39,16 +57,20 @@ export class TargetPolicy {
     }
 
     const host = url.hostname.toLowerCase();
-    const sameHost = host === this.hostname;
-    const isSubdomain = this.allowSubdomains && host.endsWith(`.${this.hostname}`);
-    if (!sameHost && !isSubdomain) {
+    // `www.` is a presentation detail of the same site, so both spellings are
+    // in scope regardless of which one the operator typed as the target.
+    const sameSite = host === this.hostname || withoutWww(host) === this.apexHostname;
+    const isSubdomain = this.allowSubdomains && withoutWww(host).endsWith(`.${this.apexHostname}`);
+    if (!sameSite && !isSubdomain) {
       return { allowed: false, reason: `outside the approved target scope (${this.origin})` };
     }
 
-    // Same host but a different port or scheme is still a different origin.
-    if (sameHost && url.origin !== this.origin) {
-      const httpsUpgrade = this.target.protocol === 'http:' && url.protocol === 'https:' && url.port === this.target.port;
-      if (!httpsUpgrade) {
+    // Same site but a different port or scheme is still a different origin.
+    if (sameSite && url.origin !== this.origin) {
+      const samePort = url.port === this.target.port;
+      const httpsUpgrade = this.target.protocol === 'http:' && url.protocol === 'https:' && samePort;
+      const wwwHop = host !== this.hostname && url.protocol === this.target.protocol && samePort;
+      if (!httpsUpgrade && !wwwHop) {
         return { allowed: false, reason: `different origin (${url.origin})` };
       }
     }
